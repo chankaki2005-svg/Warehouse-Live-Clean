@@ -1,0 +1,25 @@
+# 新輝雲端自動化後台 — Python 依賴
+# 安裝指令：python3 -m pip install --break-system-packages -r requirements.txt
+
+# 定時排程
+schedule==1.2.2
+
+# DXF 圖紙分析
+ezdxf>=1.3.0
+
+# PDF 生成
+fpdf2>=2.8.0
+
+# PostgreSQL 直連（用於早晨 WhatsApp 日報摘要）
+psycopg2-binary>=2.9.0
+
+# Google Sheets 寫入（可選，啟用時取消以下注解）
+# gspread>=6.0.0
+# google-auth>=2.0.0
+ezdxf>=1.3.0
+requests
+ezdwf==0.0.6
+pymupdf
+ezdwf==0.0.6
+ezdwf==0.0.6
+pytz
