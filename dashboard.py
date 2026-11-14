@@ -3,6 +3,8 @@
 Streamlit dashboard for warehouse inventory, anomaly alerts, workers, and project data.
 """
 
+import base64
+import mimetypes
 import os
 import json
 import urllib.request
@@ -12,6 +14,38 @@ from pathlib import Path
 
 import streamlit as st
 import pandas as pd
+
+# ── 檔案類型常量 ────────────────────────────────────────────────
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".svg"}
+PDF_EXTENSIONS = {".pdf"}
+ASSETS_DIR = Path("attached_assets")
+
+
+def scan_assets_dir(directory: Path) -> list[dict]:
+    """Recursively scan a directory for image and PDF files, return metadata list."""
+    results = []
+    if not directory.exists() or not directory.is_dir():
+        return results
+    for f in sorted(directory.rglob("*")):
+        if not f.is_file():
+            continue
+        ext = f.suffix.lower()
+        if ext not in IMAGE_EXTENSIONS and ext not in PDF_EXTENSIONS:
+            continue
+        stat = f.stat()
+        file_type = "image" if ext in IMAGE_EXTENSIONS else "pdf"
+        results.append({
+            "path": str(f),
+            "relative_path": str(f.relative_to(directory)),
+            "name": f.name,
+            "ext": ext,
+            "type": file_type,
+            "size": stat.st_size,
+            "size_kb": round(stat.st_size / 1024, 1),
+            "modified": datetime.fromtimestamp(stat.st_mtime, tz=HKT).strftime("%Y-%m-%d %H:%M"),
+            "parent": str(f.parent.relative_to(directory)),
+        })
+    return results
 
 # ── Supabase 設定 ──────────────────────────────────────────────
 SUPABASE_URL = os.environ.get("VITE_SUPABASE_URL", "").rstrip("/")
@@ -106,6 +140,7 @@ page = st.sidebar.radio("選擇頁面", [
     "📦 供應商",
     "📅 請假記錄",
     "🖼️ 圖紙庫",
+    "📷 相片與文件",
 ])
 
 # ── 頁面：總覽 ──────────────────────────────────────────────────
@@ -429,45 +464,123 @@ elif page == "🖼️ 圖紙庫":
     if drawings:
         ddf = pd.DataFrame(drawings)
         ddf["上傳日期"] = ddf["created_at"].apply(ts_to_date_str)
-        st.subheader(f"圖紙列表（共 {len(ddf)} 份）")
+        st.subheader(f"資料庫圖紙列表（共 {len(ddf)} 份）")
         st.dataframe(ddf[["name", "mime_type", "size", "上傳日期", "company_id"]].rename(columns={
             "name": "檔案名稱", "mime_type": "類型", "size": "大小 (bytes)", "company_id": "公司",
         }), use_container_width=True, hide_index=True)
     else:
-        st.info("暫無圖紙記錄。")
+        st.info("資料庫暫無圖紙記錄。")
 
     st.divider()
 
-    st.subheader("本機檔案瀏覽")
-    assets_dirs = [Path("attached_assets"), Path("pending_drawings"), Path("daily_reports")]
+    st.subheader("attached_assets 本機圖紙與 PDF")
+    asset_files = scan_assets_dir(ASSETS_DIR)
+    if asset_files:
+        pdf_files = [f for f in asset_files if f["type"] == "pdf"]
+        image_files = [f for f in asset_files if f["type"] == "image"]
+        col1, col2 = st.columns(2)
+        col1.metric("圖片檔案", len(image_files))
+        col2.metric("PDF 檔案", len(pdf_files))
+
+        if pdf_files:
+            st.subheader("PDF 文件")
+            for f in pdf_files:
+                with st.expander(f"📄 {f['relative_path']}（{f['size_kb']} KB）"):
+                    with open(f["path"], "rb") as fh:
+                        st.download_button(
+                            f"下載 {f['name']}",
+                            fh.read(),
+                            file_name=f["name"],
+                            mime="application/pdf",
+                            key=f"dl_pdf_{f['path']}",
+                        )
+    else:
+        st.info(f"{ASSETS_DIR}/ 資料夾中沒有找到圖片或 PDF 檔案。")
+
+    st.divider()
+    st.subheader("其他本機檔案夾")
+    other_dirs = [Path("pending_drawings"), Path("daily_reports")]
     found_any = False
-    for d in assets_dirs:
+    for d in other_dirs:
         if d.exists() and d.is_dir():
-            files = list(d.rglob("*"))
-            files = [f for f in files if f.is_file()]
+            files = [f for f in d.rglob("*") if f.is_file()]
             if files:
                 found_any = True
                 st.write(f"**{d}/** （{len(files)} 個檔案）")
                 for f in sorted(files):
                     size_kb = f.stat().st_size / 1024
-                    st.write(f"  - {f.relative_to(d)} ({size_kb:.1f} KB)")
+                    st.write(f"  - {f.relative_to(d)}（{size_kb:.1f} KB）")
     if not found_any:
-        st.info("本機沒有找到 attached_assets、pending_drawings 或 daily_reports 資料夾。")
+        st.info("pending_drawings / daily_reports 資料夾為空或不存在。")
 
-    st.divider()
-    st.subheader("PDF 報告瀏覽")
-    pdf_dirs = [Path("daily_reports"), Path("pending_drawings")]
-    pdf_files = []
-    for d in pdf_dirs:
-        if d.exists():
-            pdf_files.extend(d.rglob("*.pdf"))
-    if pdf_files:
-        selected_pdf = st.selectbox("選擇 PDF 報告", [str(f) for f in sorted(pdf_files)])
-        if selected_pdf and Path(selected_pdf).exists():
-            with open(selected_pdf, "rb") as f:
-                st.download_button("下載 PDF", f.read(), file_name=Path(selected_pdf).name, mime="application/pdf")
+
+# ── 頁面：相片與文件 ────────────────────────────────────────────
+elif page == "📷 相片與文件":
+    st.header("📷 相片與文件")
+    st.caption(f"掃描資料夾：{ASSETS_DIR}/")
+
+    asset_files = scan_assets_dir(ASSETS_DIR)
+
+    if not asset_files:
+        st.warning(f"{ASSETS_DIR}/ 資料夾不存在或沒有任何圖片 / PDF 檔案。")
+        st.info("請確保 attached_assets 資料夾已放在專案根目錄，並包含相片（.png / .jpg / .jpeg / .gif / .webp）或 PDF（.pdf）檔案。")
     else:
-        st.info("本機沒有找到 PDF 報告。")
+        image_files = [f for f in asset_files if f["type"] == "image"]
+        pdf_files = [f for f in asset_files if f["type"] == "pdf"]
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("圖片總數", len(image_files))
+        col2.metric("PDF 總數", len(pdf_files))
+        col3.metric("總大小", f"{sum(f['size_kb'] for f in asset_files):.1f} KB")
+
+        st.divider()
+
+        tab_images, tab_pdfs, tab_all = st.tabs([f"📷 圖片（{len(image_files)}）", f"📄 PDF（{len(pdf_files)}）", "📋 全部檔案"])
+
+        with tab_images:
+            if not image_files:
+                st.info("沒有圖片檔案。")
+            else:
+                subdirs = sorted(set(f["parent"] for f in image_files))
+                selected_dir = st.selectbox("按子資料夾篩選", ["全部"] + subdirs, key="img_dir_filter")
+                filtered_imgs = image_files if selected_dir == "全部" else [f for f in image_files if f["parent"] == selected_dir]
+
+                st.subheader(f"圖片畫廊（{len(filtered_imgs)} 張）")
+                cols_per_row = 4
+                for i in range(0, len(filtered_imgs), cols_per_row):
+                    row_imgs = filtered_imgs[i:i + cols_per_row]
+                    cols = st.columns(cols_per_row)
+                    for col, img in zip(cols, row_imgs):
+                        with col:
+                            st.image(img["path"], caption=img["relative_path"], use_container_width=True)
+                            st.caption(f"{img['size_kb']} KB · {img['modified']}")
+
+        with tab_pdfs:
+            if not pdf_files:
+                st.info("沒有 PDF 檔案。")
+            else:
+                subdirs_p = sorted(set(f["parent"] for f in pdf_files))
+                selected_pdir = st.selectbox("按子資料夾篩選", ["全部"] + subdirs_p, key="pdf_dir_filter")
+                filtered_pdfs = pdf_files if selected_pdir == "全部" else [f for f in pdf_files if f["parent"] == selected_pdir]
+
+                st.subheader(f"PDF 文件列表（{len(filtered_pdfs)} 份）")
+                for f in filtered_pdfs:
+                    with st.expander(f"📄 {f['relative_path']}（{f['size_kb']} KB · {f['modified']}）"):
+                        with open(f["path"], "rb") as fh:
+                            st.download_button(
+                                f"下載 {f['name']}",
+                                fh.read(),
+                                file_name=f["name"],
+                                mime="application/pdf",
+                                key=f"dl_pdf2_{f['path']}",
+                            )
+
+        with tab_all:
+            all_df = pd.DataFrame(asset_files)
+            st.dataframe(all_df[["relative_path", "type", "ext", "size_kb", "modified", "parent"]].rename(columns={
+                "relative_path": "檔案路徑", "type": "類型", "ext": "格式",
+                "size_kb": "大小 (KB)", "modified": "修改時間", "parent": "所在資料夾",
+            }), use_container_width=True, hide_index=True)
 
 
 # ── 頁尾 ────────────────────────────────────────────────────────
